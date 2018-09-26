@@ -4,7 +4,7 @@ import * as fs from 'fs-extra';
 import { EOL } from 'os';
 import * as path from 'path';
 import { Stream } from 'stream';
-import { Uri } from 'vscode';
+import { Uri, window } from 'vscode';
 import { ArrayUtility } from '../common/arrayUtility';
 import { Headers } from '../models/base';
 import { RestClientSettings } from '../models/configurationSettings';
@@ -112,7 +112,76 @@ export class HttpRequestParser implements IRequestParser {
             }
         }
 
+        if (typeof body === 'string') {
+            body = HttpRequestParser.maybeTransformJSONToURLEncodedForm(contentTypeHeader, bodyLines.join(EOL));
+            headers = HttpRequestParser.fixContentType(headers);
+        }
+
         return new HttpRequest(requestLine.method, requestLine.url, headers, body, bodyLines.join(EOL));
+    }
+
+    private static fixContentType(headers: { [key: string]: string }) {
+        const contentType = getHeader(headers, 'content-type');
+        if (contentType === 'application/x-www-form-urlencoded+json') {
+            headers['Content-Type'] = 'application/x-www-form-urlencoded';
+            return headers;
+        } else {
+            return headers;
+        }
+    }
+
+    private static flattenJSON(keys: Array<string>, hash: Object): Array<[Array<String>, string]> {
+        let results = [];
+        Object.keys(hash).map((k) => {
+            if (typeof hash[k] === "object") {
+                results = results.concat(HttpRequestParser.flattenJSON(keys.concat([k]), hash[k]));
+            } else {
+                results.push([keys.concat([k]), hash[k]]);
+            }
+        });
+
+        return results;
+    }
+
+    private static flattenJSONKeys(keys: Array<string>, value: any) {
+        if (typeof value === "object" && !(value instanceof Array)) {
+            return Object.keys(value).reduce((acc, k) => {
+                const inner = this.flattenJSONKeys(keys.concat(k), value[k]);
+                return acc.concat(inner);
+            }, []);
+        } else if (value instanceof Array) {
+            return value.reduce((acc, x) => {
+                return acc.concat(this.flattenJSONKeys(keys.concat(""), x));
+            }, []);
+        } else {
+            return [[keys, value]];
+        }
+    }
+
+    private static convertKeys(values: Array<[string[], any]>) {
+        return values.map((x) => {
+            const keys = x[0];
+            const first = keys.slice(0, 1);
+            const remaining = keys.slice(1).map((x) => `[${x}]`);
+            const k = encodeURIComponent(first.concat(remaining).join(''));
+            const value = encodeURIComponent(x[1]);
+            return `${k}=${value}`;
+        }).join("&");
+    }
+
+    private static maybeTransformJSONToURLEncodedForm(contentTypeHeader: string, bodyJoined: string): string {
+        if (contentTypeHeader === 'application/x-www-form-urlencoded+json') {
+            try {
+                let formObject = JSON.parse(bodyJoined);
+                return this.convertKeys(this.flattenJSONKeys([], formObject));
+            } catch (ex) {
+                window.showErrorMessage(`Unable to parse JSON: ${ex}`);
+                throw ex;
+                // return bodyJoined;
+            }
+        } else {
+            return bodyJoined;
+        }
     }
 
     private static parseRequestLine(line: string): { method: string, url: string } {
